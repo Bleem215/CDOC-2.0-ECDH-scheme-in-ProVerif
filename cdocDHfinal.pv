@@ -1,0 +1,150 @@
+(* Types *)
+set ignoreTypes = false.
+ 
+type pkey.
+type party.
+type G.
+type exponent.
+ 
+free c:channel.
+ 
+(* HKDF functions *)
+fun hkdf_extract(bitstring): bitstring.
+fun hkdf_expand(bitstring): bitstring.
+ 
+(* DH *)
+const expB: exponent [private].
+const g: G.
+fun exp(G, exponent): G.
+equation forall x: exponent, y: exponent; exp(exp(g, x), y) = exp(exp(g, y), x).
+ 
+(* XOR function *)
+fun xor(bitstring,bitstring):bitstring.
+equation forall x:bitstring, y:bitstring; xor(xor(x,y),y)=x.
+equation forall x:bitstring; xor(x,xor(x,x))=x.
+equation forall x:bitstring; xor(xor(x,x),x)=x.
+equation forall x:bitstring, y:bitstring; xor(y,xor(x,x))=y.
+equation forall x:bitstring, y:bitstring; xor(xor(x,y),xor(x,x))= xor(x,y).
+equation forall x:bitstring, y:bitstring; xor(xor(x,y),xor(y,y))= xor(x,y).
+ 
+(* Symmetric encryption and decryption *)
+fun senc(bitstring, bitstring): bitstring.
+reduc forall m:bitstring, k:bitstring; sdec(senc(m,k),k) = m.
+ 
+(* Type conversion *)
+fun gToBitstring(G) : bitstring [data, typeConverter].
+fun gToPkey(G) : pkey [data, typeConverter].
+reduc forall g:G; pkeyToG(gToPkey(g)) = g.
+ 
+(* secret between two parties *)
+fun m(party,party) : bitstring [private]. (* private because attacker cannot derive secret just from party names *)
+ 
+(* Key table *)
+table pkeys(party,pkey).
+ 
+(* Queries & Events *)
+event aFinished().
+event bFinished().
+ 
+event honest(party).
+ 
+event viewBeginA(party,party,bitstring).
+event viewBeginB(party,party,bitstring).
+event viewEndA(party,party,bitstring).
+event viewEndB(party,party,bitstring).
+ 
+query event(aFinished()).
+query event(bFinished()).
+ 
+(* Attacker tries to guess secret message *)
+query A : party, B : party; event(honest(A)) && event(honest(B)) && attacker(m(A,B)).
+ 
+query A : party, B : party, keyAB : bitstring; event(honest(A)) && event(honest(B)) && event(viewEndB(A,B,keyAB)) ==> event(viewBeginA(A,B,keyAB)).
+ 
+query A : party, B : party, keyAB : bitstring; event(honest(A)) && event(honest(B)) && inj-event(viewEndB(A,B,keyAB)) ==> inj-event(viewBeginA(A,B,keyAB)).
+ 
+let processA (A: party, B : party) =     
+        	    
+        	(* Generating CEK from FMK using HKDF *)
+        	new nonce:bitstring;
+        	let fmk = hkdf_extract(nonce) in
+        	let cek = hkdf_expand(fmk) in    
+        	event viewBeginA(A,B, cek);   
+    
+        	(* Message encryption *)
+        	let cipher = senc(m(A,B), cek) in 
+    
+        	(* DH encapsulation *)
+        	new expA : exponent;
+        	let gWithA = exp(g, expA) in 
+    
+        	(* Retrieves PK of B *)
+        	get pkeys(=B, pkB: pkey) in
+    
+        	(* DH Completion *)
+        	let dhB = pkeyToG(pkB) in
+        	let gWithAandB = exp(dhB, expA) in (* encapsulation *)
+        	let dhKey = gToBitstring(gWithAandB) in    
+    
+        	(* A XORs *)
+        	let ckB = xor(fmk, dhKey) in   
+ 
+        	(* Sends info to B *)
+        	out(c, (cipher, ckB, gWithA));
+    
+        	event aFinished();
+        	event viewEndA(A,B, cek);
+        	0.
+ 
+let processB (B : party, A : party) =    
+ 
+        	(* Receive info from A *)
+        	in (c, (cipher1:bitstring, ckB1: bitstring, gWithA: G));
+    
+        	(* Decapsulation *)
+        	let gWithBandA = exp(gWithA, expB) in
+    
+        	(* DH completion *)
+        	let dhKey = gToBitstring(gWithBandA) in    
+    
+        	(* XOR and cek derivation *)  
+        	let fmk1 = xor(ckB1, dhKey) in
+        	let cek1 = hkdf_expand(fmk1) in   
+        	event viewBeginB(A,B, cek1);
+        	   
+        	(* Decryption *)
+        	let (=m(A,B)) = sdec(cipher1, cek1) in (* checks if the decryption gives original message *) 
+		event bFinished();   
+        	event viewEndB(A,B, cek1);  
+        	0.   
+ 
+let honestUser(A: party, B: party) =
+    
+        	event honest(A);
+        	(processA(A, B))
+        	|
+        	(processB(B, A)).    
+    
+let dishonestUser =
+
+        	new name: party;
+        	in(c, (expX : exponent));
+        	let dhX = exp(g, expX) in
+        	let pkX = gToPkey(dhX) in
+    
+        	insert pkeys(name,pkX);    
+        	out (c, (name,pkX));
+    
+        	0.
+    
+(* Main process *)
+process    
+        	new partyA: party;
+        	new partyB: party;
+        	let dhB = exp(g, expB) in
+        	let pkB = gToPkey(dhB) in
+        	insert pkeys(partyB, pkB);
+    
+        	(!honestUser(partyA, partyB) | !dishonestUser)
+
+
